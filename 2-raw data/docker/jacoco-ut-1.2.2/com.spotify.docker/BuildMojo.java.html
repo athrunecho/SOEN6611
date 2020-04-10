@@ -1,0 +1,890 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BuildMojo.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">docker-maven-plugin</a> &gt; <a href="index.source.html" class="el_package">com.spotify.docker</a> &gt; <span class="el_source">BuildMojo.java</span></div><h1>BuildMojo.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Spotify AB.
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package com.spotify.docker;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Joiner;
+import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Ordering;
+import com.google.common.collect.Sets;
+
+import com.spotify.docker.client.AnsiProgressHandler;
+import com.spotify.docker.client.DockerClient;
+import com.spotify.docker.client.exceptions.DockerException;
+import com.typesafe.config.Config;
+import com.typesafe.config.ConfigException;
+import com.typesafe.config.ConfigFactory;
+import com.typesafe.config.ConfigValue;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.apache.maven.artifact.Artifact;
+import org.apache.maven.model.Resource;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.PluginParameterExpressionEvaluator;
+import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.project.MavenProject;
+import org.codehaus.plexus.component.configurator.expression.ExpressionEvaluationException;
+import org.codehaus.plexus.util.DirectoryScanner;
+import org.codehaus.plexus.util.FileUtils;
+import org.eclipse.jgit.api.errors.GitAPIException;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.text.MessageFormat;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
+
+import static com.google.common.base.CharMatcher.WHITESPACE;
+import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.google.common.collect.Lists.newArrayList;
+import static com.google.common.collect.Ordering.natural;
+import static com.spotify.docker.Utils.parseImageName;
+import static com.spotify.docker.Utils.pushImage;
+import static com.spotify.docker.Utils.pushImageTag;
+import static com.spotify.docker.Utils.saveImage;
+import static com.spotify.docker.Utils.writeImageInfoFile;
+import static com.typesafe.config.ConfigRenderOptions.concise;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Collections.emptyList;
+
+/**
+ * Used to build docker images.
+ */
+@Mojo(name = &quot;build&quot;, threadSafe = true)
+public class BuildMojo extends AbstractDockerMojo {
+
+<span class="fc" id="L93">  private static final Lock LOCK = new ReentrantLock();</span>
+
+  /**
+   * The Unix separator character.
+   */
+  private static final char UNIX_SEPARATOR = '/';
+
+  /**
+   * The Windows separator character.
+   */
+  private static final char WINDOWS_SEPARATOR = '\\';
+
+  /**
+   * Json Object Mapper to encode arguments map 
+   */
+<span class="fc" id="L108">  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();</span>
+  
+  /**
+   * Directory containing the Dockerfile. If the value is not set, the plugin will generate a
+   * Dockerfile using the required baseImage value, plus the optional entryPoint, cmd and maintainer
+   * values. If this value is set the plugin will use the Dockerfile in the specified folder.
+   */
+  @Parameter(property = &quot;dockerDirectory&quot;)
+  private String dockerDirectory;
+
+  /**
+   * Flag to skip docker build, making build goal a no-op. This can be useful when docker:build
+   * is bound to package goal, and you want to build a jar but not a container. Defaults to false.
+   */
+  @Parameter(property = &quot;skipDockerBuild&quot;, defaultValue = &quot;false&quot;)
+  private boolean skipDockerBuild;
+
+  /**
+   * Flag to attempt to pull base images even if older images exists locally. Sends the equivalent
+   * of `--pull=true` to Docker daemon when building the image.
+   */
+  @Parameter(property = &quot;pullOnBuild&quot;, defaultValue = &quot;false&quot;)
+  private boolean pullOnBuild;
+
+  /** Set to true to pass the `--no-cache` flag to the Docker daemon when building an image. */
+  @Parameter(property = &quot;noCache&quot;, defaultValue = &quot;false&quot;)
+  private boolean noCache;
+
+  /** Set to false to pass the `--rm` flag to the Docker daemon when building an image. */
+  @Parameter(property = &quot;rm&quot;, defaultValue = &quot;true&quot;)
+  private boolean rm;
+
+  /** File path to save image as a tar archive after it is built. */
+  @Parameter(property = &quot;saveImageToTarArchive&quot;)
+  private String saveImageToTarArchive;
+
+  /** Flag to push image after it is built. Defaults to false. */
+  @Parameter(property = &quot;pushImage&quot;, defaultValue = &quot;false&quot;)
+  private boolean pushImage;
+
+  /** Flag to push image using their tags after it is built. Defaults to false. */
+  @Parameter(property = &quot;pushImageTag&quot;, defaultValue = &quot;false&quot;)
+  private boolean pushImageTag;
+
+  /** Flag to use force option while tagging. Defaults to false. */
+  @Parameter(property = &quot;forceTags&quot;, defaultValue = &quot;false&quot;)
+  private boolean forceTags;
+
+  /** The maintainer of the image. Ignored if dockerDirectory is set. */
+  @Parameter(property = &quot;dockerMaintainer&quot;)
+  private String maintainer;
+
+  /** The base image to use. Ignored if dockerDirectory is set. */
+  @Parameter(property = &quot;dockerBaseImage&quot;)
+  private String baseImage;
+
+  /** The entry point of the image. Ignored if dockerDirectory is set. */
+  @Parameter(property = &quot;dockerEntryPoint&quot;)
+  private String entryPoint;
+
+  /** The volumes for the image */
+  @Parameter(property = &quot;dockerVolumes&quot;)
+  private String[] volumes;
+
+  /** The labels for the image */
+  @Parameter(property = &quot;dockerLabels&quot;)
+  private String[] labels;
+
+  /** The cmd command for the image. Ignored if dockerDirectory is set. */
+  @Parameter(property = &quot;dockerCmd&quot;)
+  private String cmd;
+
+  /** The workdir for the image. Ignored if dockerDirectory is set */
+  @Parameter(property = &quot;workdir&quot;)
+  private String workdir;
+
+  /** The user for the image. Ignored if dockerDirectory is set */
+  @Parameter(property = &quot;user&quot;)
+  private String user;
+
+  /**
+   * The run commands for the image.
+   */
+  @Parameter(property = &quot;dockerRuns&quot;)
+  private List&lt;String&gt; runs;
+
+  private List&lt;String&gt; runList;
+
+  /** Flag to squash all run commands into one layer. Defaults to false. */
+  @Parameter(property = &quot;squashRunCommands&quot;, defaultValue = &quot;false&quot;)
+  private boolean squashRunCommands;
+
+  /** All resources will be copied to this directory before building the image. */
+  @Parameter(property = &quot;project.build.directory&quot;)
+  protected String buildDirectory;
+
+  @Parameter(property = &quot;dockerBuildProfile&quot;)
+  private String profile;
+
+  /**
+   * Path to JSON file to write when tagging images.
+   * Default is ${project.build.testOutputDirectory}/image_info.json
+   */
+  @Parameter(property = &quot;tagInfoFile&quot;,
+      defaultValue = &quot;${project.build.testOutputDirectory}/image_info.json&quot;)
+  protected String tagInfoFile;
+
+  /**
+   * If specified as true, a tag will be generated consisting of the first 7 characters of the most
+   * recent git commit ID, resulting in something like {@code image:df8e8e6}. If there are any
+   * changes not yet committed, the string '.DIRTY' will be appended to the end. Note, if a tag is
+   * explicitly specified in the {@code newName} parameter, this flag will be ignored.
+   */
+  @Parameter(property = &quot;useGitCommitId&quot;, defaultValue = &quot;false&quot;)
+  private boolean useGitCommitId;
+
+  /**
+   * Resources to include in the build. Specify resources by using the standard resource elements as
+   * defined in the &lt;a href=&quot;http://maven.apache.org/pom.html#Resources&quot;&gt;resources&lt;/a&gt; section in
+   * the pom reference. If dockerDirectory is not set, the {@code targetPath} value is the location
+   * in the container where the resource should be copied to. The value is relative to '{@code /}'
+   * in the container, and defaults to '{@code .}'. If dockerDirectory is set, {@code targetPath}
+   * is relative to the dockerDirectory, and defaults to '{@code .}'. In that case, the Dockerfile
+   * can copy the resources into the container using the ADD instruction.
+   */
+  @Parameter(property = &quot;dockerResources&quot;)
+  private List&lt;Resource&gt; resources;
+
+  /** Built image will be given this name. */
+  @Parameter(property = &quot;dockerImageName&quot;)
+  private String imageName;
+
+  /** Additional tags to tag the image with. */
+  @SuppressWarnings(&quot;MismatchedQueryAndUpdateOfCollection&quot;)
+  @Parameter(property = &quot;dockerImageTags&quot;)
+  private List&lt;String&gt; imageTags;
+
+  @Parameter(property = &quot;dockerDefaultBuildProfile&quot;)
+  private String defaultProfile;
+
+  @Parameter(property = &quot;dockerEnv&quot;)
+  private Map&lt;String, String&gt; env;
+
+  @Parameter(property = &quot;dockerExposes&quot;)
+  private List&lt;String&gt; exposes;
+
+  private Set&lt;String&gt; exposesSet;
+
+  @Parameter(defaultValue = &quot;${project}&quot;)
+  private MavenProject mavenProject;
+
+  @Parameter(property = &quot;dockerBuildArgs&quot;)
+  private Map&lt;String, String&gt; buildArgs;  
+  
+  /** HEALTHCHECK. It expects a element for 'options' and 'cmd' 
+   * Added in docker 1.12 (https://docs.docker.com/engine/reference/builder/#/healthcheck). 
+   */
+  @Parameter(property = &quot;healthcheck&quot;)
+  private Map&lt;String, String&gt; healthcheck;
+
+  /** Set the networking mode for the RUN instructions during build */
+  @Parameter(property = &quot;network&quot;)
+  private String network;
+
+  private PluginParameterExpressionEvaluator expressionEvaluator;
+
+  public BuildMojo() {
+<span class="fc" id="L275">    this(null);</span>
+<span class="fc" id="L276">  }</span>
+
+<span class="fc" id="L278">  public BuildMojo(final String defaultProfile) {</span>
+<span class="fc" id="L279">    this.defaultProfile = defaultProfile;</span>
+<span class="fc" id="L280">  }</span>
+
+  public String getImageName() {
+<span class="nc" id="L283">    return imageName;</span>
+  }
+
+  public boolean getPushImage() {
+<span class="nc" id="L287">    return pushImage;</span>
+  }
+
+  public boolean getPushImageTag() {
+<span class="nc" id="L291">    return pushImageTag;</span>
+  }
+
+  public boolean getForceTags() {
+<span class="nc" id="L295">    return forceTags;</span>
+  }
+  
+  private boolean weShouldSkipDockerBuild() {
+<span class="fc bfc" id="L299" title="All 2 branches covered.">    if (skipDockerBuild) {</span>
+<span class="fc" id="L300">      getLog().info(&quot;Property skipDockerBuild is set&quot;);</span>
+<span class="fc" id="L301">      return true;</span>
+    }
+
+<span class="fc" id="L304">    final String packaging = session.getCurrentProject().getPackaging();</span>
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">    if (&quot;pom&quot;.equalsIgnoreCase(packaging)) {</span>
+<span class="nc" id="L306">      getLog().info(&quot;Project packaging is &quot; + packaging);</span>
+<span class="nc" id="L307">      return true;</span>
+    }
+
+<span class="fc bfc" id="L310" title="All 2 branches covered.">    if (dockerDirectory != null) {</span>
+<span class="fc" id="L311">      final Path path = Paths.get(dockerDirectory, &quot;Dockerfile&quot;);</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">      if (!path.toFile().exists()) {</span>
+<span class="nc" id="L313">        getLog().info(&quot;No Dockerfile in dockerDirectory&quot;);</span>
+<span class="nc" id="L314">        return true;</span>
+      }
+    }
+
+<span class="fc" id="L318">    return false;</span>
+  }
+
+  public boolean isSkipDockerBuild() {
+<span class="fc" id="L322">    return skipDockerBuild;</span>
+  }
+
+  @Override
+  public void execute() throws MojoExecutionException {
+    try {
+<span class="fc" id="L328">      LOCK.lock();</span>
+<span class="fc" id="L329">      super.execute();</span>
+    } finally {
+<span class="fc" id="L331">      LOCK.unlock();</span>
+    }
+<span class="fc" id="L333">  }</span>
+
+  @Override
+  protected void execute(final DockerClient docker)
+      throws MojoExecutionException, GitAPIException, IOException, DockerException,
+             InterruptedException {
+
+<span class="fc bfc" id="L340" title="All 2 branches covered.">    if (weShouldSkipDockerBuild()) {</span>
+<span class="fc" id="L341">      getLog().info(&quot;Skipping docker build&quot;);</span>
+<span class="fc" id="L342">      return;</span>
+    }
+
+    // Put the list of exposed ports into a TreeSet which will remove duplicates and keep them
+    // in a sorted order. This is useful when we merge with ports defined in the profile.
+<span class="fc" id="L347">    exposesSet = Sets.newTreeSet(exposes);</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">    if (runs != null) {</span>
+<span class="fc" id="L349">      runList = Lists.newArrayList(runs);</span>
+    }
+<span class="fc" id="L351">    expressionEvaluator = new PluginParameterExpressionEvaluator(session, execution);</span>
+
+<span class="fc" id="L353">    final Git git = new Git();</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">    final String commitId = git.isRepository() ? git.getCommitId() : null;</span>
+
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">    if (commitId == null) {</span>
+<span class="fc" id="L357">      final String errorMessage =</span>
+          &quot;Not a git repository, cannot get commit ID. Make sure git repository is initialized.&quot;;
+<span class="pc bpc" id="L359" title="2 of 6 branches missed.">      if (useGitCommitId || ((imageName != null) &amp;&amp; imageName.contains(&quot;${gitShortCommitId}&quot;))) {</span>
+<span class="nc" id="L360">        throw new MojoExecutionException(errorMessage);</span>
+      } else {
+<span class="fc" id="L362">        getLog().debug(errorMessage);</span>
+      }
+<span class="fc" id="L364">    } else {</span>
+      // Put the git commit id in the project properties. Image names may contain
+      // ${gitShortCommitId} in which case we want to fill in the actual value using the
+      // expression evaluator. We will do that once here for image names loaded from the pom,
+      // and again in the loadProfile method when we load values from the profile.
+<span class="nc" id="L369">      mavenProject.getProperties().put(&quot;gitShortCommitId&quot;, commitId);</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">      if (imageName != null) {</span>
+<span class="nc" id="L371">        imageName = expand(imageName);</span>
+      }
+<span class="nc bnc" id="L373" title="All 2 branches missed.">      if (baseImage != null) {</span>
+<span class="nc" id="L374">        baseImage = expand(baseImage);</span>
+      }
+    }
+
+<span class="fc" id="L378">    loadProfile();</span>
+<span class="fc" id="L379">    validateParameters();</span>
+
+<span class="fc" id="L381">    final String[] repoTag = parseImageName(imageName);</span>
+<span class="fc" id="L382">    final String repo = repoTag[0];</span>
+<span class="fc" id="L383">    final String tag = repoTag[1];</span>
+
+<span class="pc bpc" id="L385" title="1 of 2 branches missed.">    if (useGitCommitId) {</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">      if (tag != null) {</span>
+<span class="nc" id="L387">        getLog().warn(&quot;Ignoring useGitCommitId flag because tag is explicitly set in image name &quot;);</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">      } else if (commitId == null) {</span>
+<span class="nc" id="L389">        throw new MojoExecutionException(</span>
+            &quot;Cannot tag with git commit ID because directory not a git repo&quot;);
+      } else {
+<span class="nc" id="L392">        imageName = repo + &quot;:&quot; + commitId;</span>
+      }
+    }
+<span class="fc" id="L395">    mavenProject.getProperties().put(&quot;imageName&quot;, imageName);</span>
+
+<span class="fc" id="L397">    final String destination = getDestination();</span>
+<span class="fc bfc" id="L398" title="All 2 branches covered.">    if (dockerDirectory == null) {</span>
+<span class="fc" id="L399">      final List&lt;String&gt; copiedPaths = copyResources(destination);</span>
+<span class="fc" id="L400">      createDockerFile(destination, copiedPaths);</span>
+<span class="fc" id="L401">    } else {</span>
+<span class="fc" id="L402">      final Resource resource = new Resource();</span>
+<span class="fc" id="L403">      resource.setDirectory(dockerDirectory);</span>
+<span class="fc" id="L404">      resources.add(resource);</span>
+<span class="fc" id="L405">      copyResources(destination);</span>
+    }
+
+<span class="fc" id="L408">    buildImage(docker, destination, buildParams());</span>
+<span class="fc" id="L409">    tagImage(docker, forceTags);</span>
+
+<span class="fc" id="L411">    final DockerBuildInformation buildInfo = new DockerBuildInformation(imageName, getLog());</span>
+
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">    if (&quot;docker&quot;.equals(mavenProject.getPackaging())) {</span>
+<span class="nc" id="L414">      final File imageArtifact = createImageArtifact(mavenProject.getArtifact(), buildInfo);</span>
+<span class="nc" id="L415">      mavenProject.getArtifact().setFile(imageArtifact);</span>
+    }
+
+    // Push specific tags specified in pom rather than all images
+<span class="fc bfc" id="L419" title="All 2 branches covered.">    if (pushImageTag) {</span>
+<span class="fc" id="L420">      pushImageTag(docker, imageName, imageTags, getLog(), isSkipDockerPush());</span>
+    }
+
+<span class="fc bfc" id="L423" title="All 2 branches covered.">    if (pushImage) {</span>
+<span class="fc" id="L424">      pushImage(docker, imageName, imageTags, getLog(), buildInfo, getRetryPushCount(),</span>
+<span class="fc" id="L425">          getRetryPushTimeout(), isSkipDockerPush());</span>
+    }
+
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">    if (saveImageToTarArchive != null) {</span>
+<span class="nc" id="L429">        saveImage(docker, imageName, Paths.get(saveImageToTarArchive), getLog());</span>
+    }
+
+    // Write image info file
+<span class="fc" id="L433">    writeImageInfoFile(buildInfo, tagInfoFile);</span>
+<span class="fc" id="L434">  }</span>
+
+  private String getDestination() {
+<span class="fc" id="L437">    return Paths.get(buildDirectory, &quot;docker&quot;).toString();</span>
+  }
+
+  private File createImageArtifact(final Artifact mainArtifact,
+                                   final DockerBuildInformation buildInfo) throws IOException {
+<span class="nc" id="L442">    final String fileName = MessageFormat.format(</span>
+<span class="nc" id="L443">        &quot;{0}-{1}-docker.jar&quot;, mainArtifact.getArtifactId(), mainArtifact.getVersion());</span>
+
+<span class="nc" id="L445">    final File f = Paths.get(buildDirectory, fileName).toFile();</span>
+<span class="nc" id="L446">    try (JarOutputStream out = new JarOutputStream(new FileOutputStream(f))) {</span>
+<span class="nc" id="L447">      final JarEntry entry = new JarEntry(</span>
+<span class="nc" id="L448">          MessageFormat.format(&quot;META-INF/docker/{0}/{1}/image-info.json&quot;,</span>
+<span class="nc" id="L449">                               mainArtifact.getGroupId(), mainArtifact.getArtifactId()));</span>
+<span class="nc" id="L450">      out.putNextEntry(entry);</span>
+<span class="nc" id="L451">      out.write(buildInfo.toJsonBytes());</span>
+    }
+
+<span class="nc" id="L454">    return f;</span>
+  }
+
+  private void loadProfile() throws MojoExecutionException {
+
+<span class="fc" id="L459">    final Config config = ConfigFactory.load();</span>
+
+<span class="fc" id="L461">    defaultProfile = get(defaultProfile, config, &quot;docker.build.defaultProfile&quot;);</span>
+
+<span class="fc bfc" id="L463" title="All 2 branches covered.">    if (profile == null) {</span>
+<span class="pc bpc" id="L464" title="1 of 2 branches missed.">      if (defaultProfile == null) {</span>
+<span class="fc" id="L465">        getLog().debug(&quot;Not using any build profile&quot;);</span>
+<span class="fc" id="L466">        return;</span>
+      } else {
+<span class="nc" id="L468">        getLog().info(&quot;Using default build profile: &quot; + defaultProfile);</span>
+<span class="nc" id="L469">        profile = defaultProfile;</span>
+      }
+    } else {
+<span class="fc" id="L472">      getLog().info(&quot;Using build profile: &quot; + profile);</span>
+    }
+
+    Config profiles;
+    try {
+<span class="fc" id="L477">      profiles = config.getConfig(&quot;docker.build.profiles&quot;);</span>
+<span class="nc" id="L478">    } catch (ConfigException.Missing e) {</span>
+<span class="nc" id="L479">      profiles = ConfigFactory.empty();</span>
+<span class="fc" id="L480">    }</span>
+
+    // Profile selection
+    final Config profileConfig;
+    try {
+<span class="fc" id="L485">      profileConfig = profiles.getConfig(profile);</span>
+<span class="nc" id="L486">    } catch (ConfigException.Missing e) {</span>
+<span class="nc" id="L487">      getLog().error(&quot;Docker build profile not found: &quot; + profile);</span>
+<span class="nc" id="L488">      getLog().error(&quot;Docker build profiles available:&quot;);</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">      for (final String name : natural().sortedCopy(profiles.root().keySet())) {</span>
+<span class="nc" id="L490">        getLog().error(name);</span>
+<span class="nc" id="L491">      }</span>
+<span class="nc" id="L492">      throw new MojoExecutionException(&quot;Docker build profile not found: &quot; + profile);</span>
+<span class="fc" id="L493">    }</span>
+
+<span class="fc" id="L495">    getLog().info(&quot;Build profile: &quot; + profile);</span>
+<span class="fc" id="L496">    getLog().info(profileConfig.root().render(concise().setJson(true).setFormatted(true)));</span>
+
+    // Resources
+<span class="fc" id="L499">    List&lt;? extends Config&gt; resourceConfigs = emptyList();</span>
+    try {
+<span class="fc" id="L501">      resourceConfigs = profileConfig.getConfigList(&quot;resources&quot;);</span>
+<span class="nc" id="L502">    } catch (ConfigException.Missing ignore) {</span>
+<span class="fc" id="L503">    }</span>
+<span class="fc bfc" id="L504" title="All 2 branches covered.">    for (final Config resourceConfig : resourceConfigs) {</span>
+<span class="fc" id="L505">      final Resource resource = new Resource();</span>
+      try {
+<span class="fc" id="L507">        resource.setDirectory(expand(resourceConfig.getString(&quot;directory&quot;)));</span>
+<span class="nc" id="L508">      } catch (ConfigException.Missing e) {</span>
+<span class="nc" id="L509">        throw new MojoExecutionException(&quot;Invalid resource config, missing directory.&quot;, e);</span>
+<span class="fc" id="L510">      }</span>
+      try {
+<span class="fc" id="L512">        resource.setTargetPath(expand(resourceConfig.getString(&quot;targetPath&quot;)));</span>
+<span class="nc" id="L513">      } catch (ConfigException.Missing ignore) {</span>
+<span class="fc" id="L514">      }</span>
+      try {
+<span class="fc" id="L516">        final List&lt;String&gt; includes = resourceConfig.getStringList(&quot;includes&quot;);</span>
+<span class="fc" id="L517">        final List&lt;String&gt; expanded = newArrayList();</span>
+<span class="fc bfc" id="L518" title="All 2 branches covered.">        for (final String raw : includes) {</span>
+<span class="fc" id="L519">          expanded.add(expand(raw));</span>
+<span class="fc" id="L520">        }</span>
+<span class="fc" id="L521">        resource.setIncludes(expanded);</span>
+<span class="nc" id="L522">      } catch (ConfigException.Missing ignore) {</span>
+<span class="fc" id="L523">      }</span>
+<span class="fc" id="L524">      resources.add(resource);</span>
+<span class="fc" id="L525">    }</span>
+
+    // Environment variables
+<span class="fc" id="L528">    Config envConfig = ConfigFactory.empty();</span>
+    try {
+<span class="fc" id="L530">      envConfig = profileConfig.getConfig(&quot;env&quot;);</span>
+<span class="nc" id="L531">    } catch (ConfigException.Missing ignore) {</span>
+<span class="fc" id="L532">    }</span>
+<span class="pc bpc" id="L533" title="1 of 2 branches missed.">    if (env == null) {</span>
+<span class="nc" id="L534">      env = Maps.newHashMap();</span>
+    }
+<span class="fc bfc" id="L536" title="All 2 branches covered.">    for (final Map.Entry&lt;String, ConfigValue&gt; entry : envConfig.root().entrySet()) {</span>
+<span class="fc" id="L537">      final String key = expand(entry.getKey());</span>
+<span class="pc bpc" id="L538" title="1 of 2 branches missed.">      if (!env.containsKey(key)) {</span>
+<span class="fc" id="L539">        env.put(key, expand(entry.getValue().unwrapped().toString()));</span>
+      }
+<span class="fc" id="L541">    }</span>
+
+    // Exposed ports
+<span class="fc" id="L544">    List&lt;String&gt; exposesList = emptyList();</span>
+    try {
+<span class="fc" id="L546">      exposesList = profileConfig.getStringList(&quot;exposes&quot;);</span>
+<span class="nc" id="L547">    } catch (ConfigException.Missing ignore) {</span>
+<span class="fc" id="L548">    }</span>
+<span class="fc bfc" id="L549" title="All 2 branches covered.">    for (final String raw : exposesList) {</span>
+<span class="fc" id="L550">      exposesSet.add(expand(raw));</span>
+<span class="fc" id="L551">    }</span>
+
+    try {
+<span class="nc" id="L554">      runList.addAll(profileConfig.getStringList(&quot;runs&quot;));</span>
+<span class="fc" id="L555">    } catch (ConfigException.Missing ignore) {</span>
+<span class="nc" id="L556">    }</span>
+
+    // Simple properties
+<span class="fc" id="L559">    imageName = get(imageName, profileConfig, &quot;imageName&quot;);</span>
+<span class="fc" id="L560">    baseImage = get(baseImage, profileConfig, &quot;baseImage&quot;);</span>
+<span class="fc" id="L561">    entryPoint = get(entryPoint, profileConfig, &quot;entryPoint&quot;);</span>
+<span class="fc" id="L562">    cmd = get(cmd, profileConfig, &quot;cmd&quot;);</span>
+<span class="fc" id="L563">    workdir = get(workdir, profileConfig, &quot;workdir&quot;);</span>
+<span class="fc" id="L564">    user = get(user, profileConfig, &quot;user&quot;);</span>
+<span class="fc" id="L565">  }</span>
+
+  private String get(final String override, final Config config, final String path)
+      throws MojoExecutionException {
+<span class="pc bpc" id="L569" title="1 of 2 branches missed.">    if (override != null) {</span>
+<span class="nc" id="L570">      return override;</span>
+    }
+    try {
+<span class="fc" id="L573">      return expand(config.getString(path));</span>
+<span class="fc" id="L574">    } catch (ConfigException.Missing e) {</span>
+<span class="fc" id="L575">      return null;</span>
+    }
+  }
+
+  private String expand(final String raw) throws MojoExecutionException {
+    final Object value;
+    try {
+<span class="fc" id="L582">      value = expressionEvaluator.evaluate(raw);</span>
+<span class="nc" id="L583">    } catch (ExpressionEvaluationException e) {</span>
+<span class="nc" id="L584">      throw new MojoExecutionException(&quot;Expression evaluation failed: &quot; + raw, e);</span>
+<span class="fc" id="L585">    }</span>
+
+<span class="fc bfc" id="L587" title="All 2 branches covered.">    if (value == null) {</span>
+<span class="fc" id="L588">      throw new MojoExecutionException(&quot;Undefined expression: &quot; + raw);</span>
+    }
+
+<span class="fc" id="L591">    return value.toString();</span>
+  }
+
+  private void validateParameters() throws MojoExecutionException {
+<span class="fc bfc" id="L595" title="All 2 branches covered.">    if (dockerDirectory == null) {</span>
+<span class="pc bpc" id="L596" title="1 of 2 branches missed.">      if (baseImage == null) {</span>
+<span class="nc" id="L597">        throw new MojoExecutionException(&quot;Must specify baseImage if dockerDirectory is null&quot;);</span>
+      }
+    } else {
+<span class="pc bpc" id="L600" title="1 of 2 branches missed.">      if (baseImage != null) {</span>
+<span class="nc" id="L601">        getLog().warn(&quot;Ignoring baseImage because dockerDirectory is set&quot;);</span>
+      }
+<span class="pc bpc" id="L603" title="1 of 2 branches missed.">      if (maintainer != null) {</span>
+<span class="nc" id="L604">        getLog().warn(&quot;Ignoring maintainer because dockerDirectory is set&quot;);</span>
+      }
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">      if (entryPoint != null) {</span>
+<span class="nc" id="L607">        getLog().warn(&quot;Ignoring entryPoint because dockerDirectory is set&quot;);</span>
+      }
+<span class="pc bpc" id="L609" title="1 of 2 branches missed.">      if (cmd != null) {</span>
+<span class="nc" id="L610">        getLog().warn(&quot;Ignoring cmd because dockerDirectory is set&quot;);</span>
+      }
+<span class="pc bpc" id="L612" title="2 of 4 branches missed.">      if (runList != null &amp;&amp; !runList.isEmpty()) {</span>
+<span class="nc" id="L613">        getLog().warn(&quot;Ignoring run because dockerDirectory is set&quot;);</span>
+      }
+<span class="pc bpc" id="L615" title="1 of 2 branches missed.">      if (workdir != null) {</span>
+<span class="nc" id="L616">        getLog().warn(&quot;Ignoring workdir because dockerDirectory is set&quot;);</span>
+      }
+<span class="pc bpc" id="L618" title="1 of 2 branches missed.">      if (user != null) {</span>
+<span class="nc" id="L619">        getLog().warn(&quot;Ignoring user because dockerDirectory is set&quot;);</span>
+      }
+    }
+<span class="fc" id="L622">  }</span>
+
+  private void buildImage(final DockerClient docker, final String buildDir,
+                          final DockerClient.BuildParam... buildParams)
+      throws MojoExecutionException, DockerException, IOException, InterruptedException {
+<span class="fc" id="L627">    getLog().info(&quot;Building image &quot; + imageName);</span>
+<span class="fc" id="L628">    docker.build(Paths.get(buildDir), imageName, new AnsiProgressHandler(), buildParams);</span>
+<span class="fc" id="L629">    getLog().info(&quot;Built &quot; + imageName);</span>
+<span class="fc" id="L630">  }</span>
+
+  private void tagImage(final DockerClient docker, boolean forceTags)
+      throws DockerException, InterruptedException, MojoExecutionException {
+<span class="fc" id="L634">    final String imageNameWithoutTag = parseImageName(imageName)[0];</span>
+<span class="fc bfc" id="L635" title="All 2 branches covered.">    for (final String imageTag : imageTags) {</span>
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">      if (!isNullOrEmpty(imageTag)){</span>
+<span class="fc" id="L637">        getLog().info(&quot;Tagging &quot; + imageName + &quot; with &quot; + imageTag);</span>
+<span class="fc" id="L638">        docker.tag(imageName, imageNameWithoutTag + &quot;:&quot; + imageTag, forceTags);</span>
+      }
+<span class="fc" id="L640">    }</span>
+<span class="fc" id="L641">  }</span>
+
+  private void createDockerFile(final String directory, final List&lt;String&gt; filesToAdd)
+      throws IOException {
+
+<span class="fc" id="L646">    final List&lt;String&gt; commands = newArrayList();</span>
+<span class="pc bpc" id="L647" title="1 of 2 branches missed.">    if (baseImage != null) {</span>
+<span class="fc" id="L648">      commands.add(&quot;FROM &quot; + baseImage);</span>
+    }
+<span class="fc bfc" id="L650" title="All 2 branches covered.">    if (maintainer != null) {</span>
+<span class="fc" id="L651">      commands.add(&quot;MAINTAINER &quot; + maintainer);</span>
+    }
+
+<span class="pc bpc" id="L654" title="1 of 2 branches missed.">    if (env != null) {</span>
+<span class="fc" id="L655">      final List&lt;String&gt; sortedKeys = Ordering.natural().sortedCopy(env.keySet());</span>
+<span class="fc bfc" id="L656" title="All 2 branches covered.">      for (final String key : sortedKeys) {</span>
+<span class="fc" id="L657">        final String value = env.get(key);</span>
+<span class="fc" id="L658">        commands.add(String.format(&quot;ENV %s %s&quot;, key, value));</span>
+<span class="fc" id="L659">      }</span>
+    }
+
+<span class="fc bfc" id="L662" title="All 2 branches covered.">    if (workdir != null) {</span>
+<span class="fc" id="L663">      commands.add(&quot;WORKDIR &quot; + workdir);</span>
+    }
+
+<span class="fc bfc" id="L666" title="All 2 branches covered.">    for (final String file : filesToAdd) {</span>
+      // The dollar sign in files has to be escaped because docker interprets it as variable
+<span class="fc" id="L668">      commands.add(</span>
+<span class="fc" id="L669">              String.format(&quot;ADD %s %s&quot;, file.replaceAll(&quot;\\$&quot;, &quot;\\\\\\$&quot;), normalizeDest(file)));</span>
+<span class="fc" id="L670">    }</span>
+
+<span class="pc bpc" id="L672" title="1 of 4 branches missed.">    if (runList != null &amp;&amp; !runList.isEmpty()) {</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">      if (squashRunCommands) {</span>
+<span class="fc" id="L674">        commands.add(&quot;RUN &quot; + Joiner.on(&quot; &amp;&amp;\\\n\t&quot;).join(runList));</span>
+      } else {
+<span class="fc bfc" id="L676" title="All 2 branches covered.">        for (final String run : runList) {</span>
+<span class="fc" id="L677">          commands.add(&quot;RUN &quot; + run);</span>
+<span class="fc" id="L678">        }</span>
+      }
+    }
+
+<span class="pc bpc" id="L682" title="1 of 4 branches missed.">    if (healthcheck != null &amp;&amp; healthcheck.containsKey(&quot;cmd&quot;)) {</span>
+<span class="fc" id="L683">      final StringBuffer healthcheckBuffer = new StringBuffer(&quot;HEALTHCHECK &quot;);</span>
+<span class="pc bpc" id="L684" title="1 of 2 branches missed.">      if (healthcheck.containsKey(&quot;options&quot;)) {</span>
+<span class="fc" id="L685">        healthcheckBuffer.append(healthcheck.get(&quot;options&quot;));</span>
+<span class="fc" id="L686">        healthcheckBuffer.append(&quot; &quot;);</span>
+      }
+<span class="fc" id="L688">      healthcheckBuffer.append(&quot;CMD &quot;);</span>
+<span class="fc" id="L689">      healthcheckBuffer.append(healthcheck.get(&quot;cmd&quot;));</span>
+<span class="fc" id="L690">      commands.add(healthcheckBuffer.toString());</span>
+    }
+
+<span class="fc bfc" id="L693" title="All 2 branches covered.">    if (exposesSet.size() &gt; 0) {</span>
+      // The values will be sorted with no duplicated since exposesSet is a TreeSet
+<span class="fc" id="L695">      commands.add(&quot;EXPOSE &quot; + Joiner.on(&quot; &quot;).join(exposesSet));</span>
+    }
+
+<span class="fc bfc" id="L698" title="All 2 branches covered.">    if (user != null) {</span>
+<span class="fc" id="L699">      commands.add(&quot;USER &quot; + user);</span>
+    }
+
+<span class="pc bpc" id="L702" title="1 of 2 branches missed.">    if (entryPoint != null) {</span>
+<span class="fc" id="L703">      commands.add(&quot;ENTRYPOINT &quot; + entryPoint);</span>
+    }
+<span class="fc bfc" id="L705" title="All 2 branches covered.">    if (cmd != null) {</span>
+      // TODO(dano): we actually need to check whether the base image has an entrypoint
+<span class="pc bpc" id="L707" title="1 of 2 branches missed.">      if (entryPoint != null) {</span>
+        // CMD needs to be a list of arguments if ENTRYPOINT is set.
+<span class="pc bpc" id="L709" title="3 of 4 branches missed.">        if (cmd.startsWith(&quot;[&quot;) &amp;&amp; cmd.endsWith(&quot;]&quot;)) {</span>
+          // cmd seems to be an argument list, so we're good
+<span class="nc" id="L711">          commands.add(&quot;CMD &quot; + cmd);</span>
+        } else {
+          // cmd does not seem to be an argument list, so try to generate one.
+<span class="fc" id="L714">          final List&lt;String&gt; args = ImmutableList.copyOf(</span>
+<span class="fc" id="L715">              Splitter.on(WHITESPACE).omitEmptyStrings().split(cmd));</span>
+<span class="fc" id="L716">          final StringBuilder cmdBuilder = new StringBuilder(&quot;[&quot;);</span>
+<span class="fc bfc" id="L717" title="All 2 branches covered.">          for (final String arg : args) {</span>
+<span class="fc" id="L718">            cmdBuilder.append('&quot;').append(arg).append('&quot;');</span>
+<span class="fc" id="L719">          }</span>
+<span class="fc" id="L720">          cmdBuilder.append(']');</span>
+<span class="fc" id="L721">          final String cmdString = cmdBuilder.toString();</span>
+<span class="fc" id="L722">          commands.add(&quot;CMD &quot; + cmdString);</span>
+<span class="fc" id="L723">          getLog().warn(&quot;Entrypoint provided but cmd is not an explicit list. Attempting to &quot; +</span>
+                        &quot;generate CMD string in the form of an argument list.&quot;);
+<span class="fc" id="L725">          getLog().warn(&quot;CMD &quot; + cmdString);</span>
+<span class="fc" id="L726">        }</span>
+      } else {
+        // no ENTRYPOINT set so use cmd verbatim
+<span class="nc" id="L729">        commands.add(&quot;CMD &quot; + cmd);</span>
+      }
+    }
+
+    // Add VOLUME's to dockerfile
+<span class="pc bpc" id="L734" title="1 of 2 branches missed.">    if (volumes != null) {</span>
+<span class="fc bfc" id="L735" title="All 2 branches covered.">      for (final String volume : volumes) {</span>
+<span class="fc" id="L736">        commands.add(&quot;VOLUME &quot; + volume);</span>
+      }
+    }
+
+    // Add LABEL's to dockerfile
+<span class="pc bpc" id="L741" title="1 of 2 branches missed.">    if (labels != null) {</span>
+<span class="fc bfc" id="L742" title="All 2 branches covered.">      for (final String label : labels) {</span>
+<span class="fc" id="L743">        commands.add(&quot;LABEL &quot; + label);</span>
+      }
+    }
+
+<span class="fc" id="L747">    getLog().debug(&quot;Writing Dockerfile:&quot; + System.lineSeparator() +</span>
+<span class="fc" id="L748">                   Joiner.on(System.lineSeparator()).join(commands));</span>
+
+    // this will overwrite an existing file
+<span class="fc" id="L751">    Files.createDirectories(Paths.get(directory));</span>
+<span class="fc" id="L752">    Files.write(Paths.get(directory, &quot;Dockerfile&quot;), commands, UTF_8);</span>
+<span class="fc" id="L753">  }</span>
+
+  private String normalizeDest(final String filePath) {
+    // if the path is a file (i.e. not a directory), remove the last part of the path so that we
+    // end up with:
+    //   ADD foo/bar.txt foo/
+    // instead of
+    //   ADD foo/bar.txt foo/bar.txt
+    // This is to prevent issues when adding tar.gz or other archives where Docker will
+    // automatically expand the archive into the &quot;dest&quot;, so
+    //  ADD foo/x.tar.gz foo/x.tar.gz
+    // results in x.tar.gz being expanded *under* the path foo/x.tar.gz/stuff...
+<span class="fc" id="L765">    final File file = new File(filePath);</span>
+
+    final String dest;
+    // need to know the path relative to destination to test if it is a file or directory,
+    // but only remove the last part of the path if there is a parent (i.e. don't remove a
+    // parent path segment from &quot;file.txt&quot;)
+<span class="fc bfc" id="L771" title="All 2 branches covered.">    if (new File(getDestination(), filePath).isFile()) {</span>
+<span class="fc bfc" id="L772" title="All 2 branches covered.">      if (file.getParent() != null) {</span>
+        // remove file part of path
+<span class="fc" id="L774">        dest = separatorsToUnix(file.getParent()) + &quot;/&quot;;</span>
+      } else {
+        // working with a simple &quot;ADD file.txt&quot;
+<span class="fc" id="L777">        dest = &quot;.&quot;;</span>
+      }
+    } else {
+<span class="fc" id="L780">      dest = separatorsToUnix(file.getPath());</span>
+    }
+
+<span class="fc" id="L783">    return dest;</span>
+  }
+
+  @SuppressFBWarnings(&quot;NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE&quot;)
+  private List&lt;String&gt; copyResources(String destination) throws IOException {
+
+<span class="fc" id="L789">    final List&lt;String&gt; allCopiedPaths = newArrayList();</span>
+
+<span class="fc bfc" id="L791" title="All 2 branches covered.">    for (final Resource resource : resources) {</span>
+<span class="fc" id="L792">      final File source = new File(resource.getDirectory());</span>
+<span class="fc" id="L793">      final List&lt;String&gt; includes = resource.getIncludes();</span>
+<span class="fc" id="L794">      final List&lt;String&gt; excludes = resource.getExcludes();</span>
+<span class="fc" id="L795">      final DirectoryScanner scanner = new DirectoryScanner();</span>
+<span class="fc" id="L796">      scanner.setBasedir(source);</span>
+      // must pass null if includes/excludes is empty to get default filters.
+      // passing zero length array forces it to have no filters at all.
+<span class="fc bfc" id="L799" title="All 2 branches covered.">      scanner.setIncludes(includes.isEmpty() ? null</span>
+<span class="fc" id="L800">                                             : includes.toArray(new String[includes.size()]));</span>
+<span class="fc bfc" id="L801" title="All 2 branches covered.">      scanner.setExcludes(excludes.isEmpty() ? null</span>
+<span class="fc" id="L802">                                             : excludes.toArray(new String[excludes.size()]));</span>
+<span class="fc" id="L803">      scanner.scan();</span>
+
+<span class="fc" id="L805">      final String[] includedFiles = scanner.getIncludedFiles();</span>
+<span class="pc bpc" id="L806" title="1 of 2 branches missed.">      if (includedFiles.length == 0) {</span>
+<span class="nc" id="L807">        getLog().info(&quot;No resources will be copied, no files match specified patterns&quot;);</span>
+      }
+
+<span class="fc" id="L810">      final List&lt;String&gt; copiedPaths = newArrayList();</span>
+
+<span class="pc bpc" id="L812" title="1 of 4 branches missed.">      final boolean copyWholeDir = includes.isEmpty() &amp;&amp; excludes.isEmpty() &amp;&amp;</span>
+<span class="fc bfc" id="L813" title="All 2 branches covered.">                             resource.getTargetPath() != null;</span>
+
+      // file location relative to docker directory, used later to generate Dockerfile
+<span class="fc bfc" id="L816" title="All 2 branches covered.">      final String targetPath = resource.getTargetPath() == null ? &quot;&quot; : resource.getTargetPath();</span>
+
+<span class="fc bfc" id="L818" title="All 2 branches covered.">      if (copyWholeDir) {</span>
+<span class="fc" id="L819">        final Path destPath = Paths.get(destination, targetPath);</span>
+<span class="fc" id="L820">        getLog().info(String.format(&quot;Copying dir %s -&gt; %s&quot;, source, destPath));</span>
+
+<span class="fc" id="L822">        Files.createDirectories(destPath);</span>
+<span class="fc" id="L823">        FileUtils.copyDirectoryStructure(source, destPath.toFile());</span>
+<span class="fc" id="L824">        copiedPaths.add(separatorsToUnix(targetPath));</span>
+<span class="fc" id="L825">      } else {</span>
+<span class="fc bfc" id="L826" title="All 2 branches covered.">        for (final String included : includedFiles) {</span>
+<span class="fc" id="L827">          final Path sourcePath = Paths.get(resource.getDirectory()).resolve(included);</span>
+<span class="fc" id="L828">          final Path destPath = Paths.get(destination, targetPath).resolve(included);</span>
+<span class="fc" id="L829">          getLog().info(String.format(&quot;Copying %s -&gt; %s&quot;, sourcePath, destPath));</span>
+          // ensure all directories exist because copy operation will fail if they don't
+<span class="fc" id="L831">          Files.createDirectories(destPath.getParent());</span>
+<span class="fc" id="L832">          Files.copy(sourcePath, destPath, StandardCopyOption.REPLACE_EXISTING,</span>
+                     StandardCopyOption.COPY_ATTRIBUTES);
+
+<span class="fc" id="L835">          copiedPaths.add(separatorsToUnix(Paths.get(targetPath).resolve(included).toString()));</span>
+        }
+      }
+
+      // The list of included files returned from DirectoryScanner can be in a different order
+      // each time. This causes the ADD statements in the generated Dockerfile to appear in a
+      // different order. We want to avoid this so each run of the plugin always generates the same
+      // Dockerfile, which also makes testing easier. Sort the list of paths for each resource
+      // before adding it to the allCopiedPaths list. This way we follow the ordering of the
+      // resources in the pom, while making sure all the paths of each resource are always in the
+      // same order.
+<span class="fc" id="L846">      Collections.sort(copiedPaths);</span>
+<span class="fc" id="L847">      allCopiedPaths.addAll(copiedPaths);</span>
+<span class="fc" id="L848">    }</span>
+
+<span class="fc" id="L850">    return allCopiedPaths;</span>
+  }
+
+  /**
+   * Converts all separators to the Unix separator of forward slash.
+   *
+   * @param path  the path to be changed, null ignored
+   * @return the updated path
+   */
+  public static String separatorsToUnix(final String path) {
+<span class="pc bpc" id="L860" title="2 of 4 branches missed.">    if (path == null || path.indexOf(WINDOWS_SEPARATOR) == -1) {</span>
+<span class="fc" id="L861">      return path;</span>
+    }
+<span class="nc" id="L863">    return path.replace(WINDOWS_SEPARATOR, UNIX_SEPARATOR);</span>
+  }
+
+  private DockerClient.BuildParam[] buildParams() 
+    throws UnsupportedEncodingException, JsonProcessingException {
+<span class="fc" id="L868">    final List&lt;DockerClient.BuildParam&gt; buildParams = Lists.newArrayList();</span>
+<span class="fc bfc" id="L869" title="All 2 branches covered.">    if (pullOnBuild) {</span>
+<span class="fc" id="L870">      buildParams.add(DockerClient.BuildParam.pullNewerImage());</span>
+    }
+<span class="fc bfc" id="L872" title="All 2 branches covered.">    if (noCache) {</span>
+<span class="fc" id="L873">      buildParams.add(DockerClient.BuildParam.noCache());</span>
+    }
+<span class="fc bfc" id="L875" title="All 2 branches covered.">    if (!rm) {</span>
+<span class="fc" id="L876">        buildParams.add(DockerClient.BuildParam.rm(false));</span>
+      }
+<span class="fc bfc" id="L878" title="All 2 branches covered.">    if (!buildArgs.isEmpty()) {</span>
+<span class="fc" id="L879">      buildParams.add(DockerClient.BuildParam.create(&quot;buildargs&quot;, </span>
+<span class="fc" id="L880">        URLEncoder.encode(OBJECT_MAPPER.writeValueAsString(buildArgs), &quot;UTF-8&quot;)));</span>
+    }
+<span class="pc bpc" id="L882" title="1 of 2 branches missed.">    if (!isNullOrEmpty(network)) {</span>
+<span class="nc" id="L883">    	buildParams.add(DockerClient.BuildParam.create(&quot;networkmode&quot;, network));</span>
+    }
+<span class="fc" id="L885">    return buildParams.toArray(new DockerClient.BuildParam[buildParams.size()]);</span>
+  }
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.5.201910111838</span></div></body></html>

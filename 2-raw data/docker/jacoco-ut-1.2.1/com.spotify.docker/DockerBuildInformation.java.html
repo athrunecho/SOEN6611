@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="zh"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DockerBuildInformation.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">docker-maven-plugin</a> &gt; <a href="index.source.html" class="el_package">com.spotify.docker</a> &gt; <span class="el_source">DockerBuildInformation.java</span></div><h1>DockerBuildInformation.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Spotify AB.
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package com.spotify.docker;
+
+import com.google.common.base.Throwables;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.apache.maven.plugin.logging.Log;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.Repository;
+
+import java.io.IOException;
+
+import static com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL;
+import static com.fasterxml.jackson.databind.MapperFeature.SORT_PROPERTIES_ALPHABETICALLY;
+import static com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS;
+import static com.google.common.base.Strings.isNullOrEmpty;
+
+//* Might be overkill to do it this way, but should simplify things when if/when we add more to this
+public class DockerBuildInformation {
+<span class="fc" id="L43">  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()</span>
+<span class="fc" id="L44">      .configure(SORT_PROPERTIES_ALPHABETICALLY, true)</span>
+<span class="fc" id="L45">      .configure(ORDER_MAP_ENTRIES_BY_KEYS, true)</span>
+<span class="fc" id="L46">      .setSerializationInclusion(NON_NULL);</span>
+
+  @JsonProperty(&quot;image&quot;)
+  private final String image;
+
+  @JsonProperty(&quot;repo&quot;)
+  private String repo;
+
+  @JsonProperty(&quot;commit&quot;)
+  private String commit;
+
+  @JsonProperty(&quot;digest&quot;)
+  private String digest;
+
+<span class="fc" id="L60">  public DockerBuildInformation(final String image, final Log log) {</span>
+<span class="fc" id="L61">    this.image = image;</span>
+<span class="fc" id="L62">    updateGitInformation(log);</span>
+<span class="fc" id="L63">  }</span>
+
+  public DockerBuildInformation setDigest(final String digest) {
+<span class="fc" id="L66">    this.digest = digest;</span>
+<span class="fc" id="L67">    return this;</span>
+  }
+
+  private void updateGitInformation(Log log) {
+    try {
+<span class="fc" id="L72">      final Repository repo = new Git().getRepo();</span>
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">      if (repo != null) {</span>
+<span class="nc" id="L74">        this.repo   = repo.getConfig().getString(&quot;remote&quot;, &quot;origin&quot;, &quot;url&quot;);</span>
+<span class="nc" id="L75">        final ObjectId head = repo.resolve(&quot;HEAD&quot;);</span>
+<span class="nc bnc" id="L76" title="All 4 branches missed.">        if (head != null &amp;&amp; !isNullOrEmpty(head.getName())) {</span>
+<span class="nc" id="L77">          this.commit = head.getName();</span>
+        }
+      }
+<span class="nc" id="L80">    } catch (IOException e) {</span>
+<span class="nc" id="L81">      log.error(&quot;Failed to read Git information&quot;, e);</span>
+<span class="fc" id="L82">    }</span>
+<span class="fc" id="L83">  }</span>
+
+
+  public byte[] toJsonBytes() {
+    try {
+<span class="fc" id="L88">      return OBJECT_MAPPER.writeValueAsBytes(this);</span>
+<span class="nc" id="L89">    } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L90">      throw Throwables.propagate(e);</span>
+    }
+  }
+
+  public String getImage() {
+<span class="fc" id="L95">    return image;</span>
+  }
+
+  public String getRepo(){
+<span class="fc" id="L99">    return repo;</span>
+  }
+
+  public String getCommit(){
+<span class="fc" id="L103">    return commit;</span>
+  }
+
+  public String getDigest() {
+<span class="fc" id="L107">    return digest;</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.5.201910111838</span></div></body></html>

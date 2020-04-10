@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="zh"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TagMojo.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">docker-maven-plugin</a> &gt; <a href="index.source.html" class="el_package">com.spotify.docker</a> &gt; <span class="el_source">TagMojo.java</span></div><h1>TagMojo.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Spotify AB.
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package com.spotify.docker;
+
+
+import com.spotify.docker.client.DockerClient;
+import com.spotify.docker.client.exceptions.DockerException;
+
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
+import org.eclipse.jgit.api.errors.GitAPIException;
+
+import java.io.IOException;
+
+import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.spotify.docker.Utils.parseImageName;
+import static com.spotify.docker.Utils.pushImage;
+import static com.spotify.docker.Utils.writeImageInfoFile;
+
+/**
+ * Applies a tag to a docker image. Optionally, {@code useGitCommitId} can be used to generate a
+ * tag consisting of the first 7 characters of the most recent git commit ID.
+ */
+@Mojo(name = &quot;tag&quot;)
+<span class="fc" id="L45">public class TagMojo extends AbstractDockerMojo {</span>
+
+  /**
+   * Can be either an image ID (e.g. 8dbd9e392a96), or an image name with an optional tag. If no
+   * tag is specified, the docker daemon will automatically try to use the tag 'latest'.
+   */
+  @Parameter(property = &quot;image&quot;, required = true)
+  private String image;
+
+  /**
+   * Flag to skip tagging, making goal a no-op. This can be useful when docker:tag is bound to
+   * the package goal, and you want to mvn package without tagging the image. Defaults to false.
+   */
+  @Parameter(property = &quot;skipDockerTag&quot;, defaultValue = &quot;false&quot;)
+  private boolean skipDockerTag;
+
+  /**
+   * The new name that will be applied to the source image. If a tag is not specified, the docker
+   * daemon will automatically apply the tag 'latest' to the specified repo. Only a repo without a
+   * tag should be specified if {@code useGitCommitId} is set to true.
+   */
+  @Parameter(property = &quot;newName&quot;, required = true)
+  private String newName;
+
+  /** Flag to push image after it is tagged. */
+  @Parameter(property = &quot;pushImage&quot;, defaultValue = &quot;false&quot;)
+  private boolean pushImage;
+
+  /** Flag to use force option while tagging. Defaults to false. */
+  @Parameter(property = &quot;forceTags&quot;, defaultValue = &quot;false&quot;)
+  private boolean forceTags;
+
+  /** Path to JSON file to write when tagging images */
+<span class="fc" id="L78">  @Parameter(property = &quot;tagInfoFile&quot;)</span>
+  private String tagInfoFile = &quot;target/image_info.json&quot;;
+
+  /**
+   * If specified as true, a tag will be generated consisting of the first 7 characters of the most
+   * recent git commit ID, resulting in something like {@code image:df8e8e6}. If there are any
+   * changes not yet committed, the string '.DIRTY' will be appended to the end. Note, if a tag is
+   * explicitly specified in the {@code newName} parameter, this flag will be ignored.
+   */
+  @Parameter(property = &quot;useGitCommitId&quot;, defaultValue = &quot;false&quot;)
+  private boolean useGitCommitId;
+
+  public boolean isSkipDockerTag() {
+<span class="fc" id="L91">    return skipDockerTag;</span>
+  }
+
+  @Override
+  protected void execute(DockerClient docker)
+      throws MojoExecutionException, DockerException,
+             IOException, InterruptedException, GitAPIException {
+
+<span class="fc bfc" id="L99" title="All 2 branches covered.">    if (skipDockerTag) {</span>
+<span class="fc" id="L100">      getLog().info(&quot;Skipping docker tag&quot;);</span>
+<span class="fc" id="L101">      return;</span>
+    }
+
+<span class="fc" id="L104">    final String[] repoTag = parseImageName(newName);</span>
+<span class="fc" id="L105">    final String repo = repoTag[0];</span>
+<span class="fc" id="L106">    String tag = repoTag[1];</span>
+
+<span class="fc bfc" id="L108" title="All 2 branches covered.">    if (useGitCommitId) {</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">      if (tag != null) {</span>
+<span class="fc" id="L110">        getLog().warn(&quot;Ignoring useGitCommitId flag because tag is explicitly set in image name &quot;);</span>
+      } else {
+<span class="nc" id="L112">        tag = new Git().getCommitId();</span>
+      }
+    }
+
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">    final String normalizedName = isNullOrEmpty(tag) ? repo : String.format(&quot;%s:%s&quot;, repo, tag);</span>
+<span class="fc" id="L117">    getLog().info(String.format(&quot;Creating tag %s from %s&quot;, normalizedName, image));</span>
+<span class="fc" id="L118">    docker.tag(image, normalizedName, forceTags);</span>
+
+<span class="fc" id="L120">    final DockerBuildInformation buildInfo = new DockerBuildInformation(normalizedName, getLog());</span>
+
+<span class="fc bfc" id="L122" title="All 2 branches covered.">    if (pushImage) {</span>
+<span class="fc" id="L123">      pushImage(docker, newName, null, getLog(), buildInfo, getRetryPushCount(),</span>
+<span class="fc" id="L124">          getRetryPushTimeout(), isSkipDockerPush());</span>
+    }
+
+<span class="fc" id="L127">    writeImageInfoFile(buildInfo, tagInfoFile);</span>
+<span class="fc" id="L128">  }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.5.201910111838</span></div></body></html>

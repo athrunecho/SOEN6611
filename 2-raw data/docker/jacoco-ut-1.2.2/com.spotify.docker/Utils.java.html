@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Utils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">docker-maven-plugin</a> &gt; <a href="index.source.html" class="el_package">com.spotify.docker</a> &gt; <span class="el_source">Utils.java</span></div><h1>Utils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2014 Spotify AB.
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package com.spotify.docker;
+
+import com.spotify.docker.client.AnsiProgressHandler;
+import com.spotify.docker.client.DockerClient;
+import com.spotify.docker.client.exceptions.DockerException;
+import com.spotify.docker.client.ProgressHandler;
+import com.spotify.docker.client.messages.ProgressMessage;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.logging.Log;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+
+import static com.google.common.base.Strings.isNullOrEmpty;
+import static java.lang.Thread.sleep;
+
+<span class="nc" id="L44">public class Utils {</span>
+
+  public static final String PUSH_FAIL_WARN_TEMPLATE = &quot;Failed to push %s,&quot;
+          + &quot; retrying in %d seconds (%d/%d).&quot;;
+
+  public static String[] parseImageName(String imageName) throws MojoExecutionException {
+<span class="pc bpc" id="L50" title="1 of 2 branches missed.">    if (isNullOrEmpty(imageName)) {</span>
+<span class="nc" id="L51">      throw new MojoExecutionException(&quot;You must specify an \&quot;imageName\&quot; in your &quot;</span>
+                                       + &quot;docker-maven-client's plugin configuration&quot;);
+    }
+<span class="fc" id="L54">    final int lastSlashIndex = imageName.lastIndexOf('/');</span>
+<span class="fc" id="L55">    final int lastColonIndex = imageName.lastIndexOf(':');</span>
+
+    // assume name doesn't contain tag by default
+<span class="fc" id="L58">    String repo = imageName;</span>
+<span class="fc" id="L59">    String tag = null;</span>
+
+    // the name contains a tag if lastColonIndex &gt; lastSlashIndex
+<span class="fc bfc" id="L62" title="All 2 branches covered.">    if (lastColonIndex &gt; lastSlashIndex) {</span>
+<span class="fc" id="L63">      repo = imageName.substring(0, lastColonIndex);</span>
+<span class="fc" id="L64">      tag = imageName.substring(lastColonIndex + 1);</span>
+      // handle case where tag is empty string (e.g. 'repo:')
+<span class="fc bfc" id="L66" title="All 2 branches covered.">      if (tag.isEmpty()) {</span>
+<span class="fc" id="L67">        tag = null;</span>
+      }
+    }
+
+<span class="fc" id="L71">    return new String[] { repo, tag };</span>
+  }
+
+  public static void pushImage(final DockerClient docker, final String imageName,
+                               final List&lt;String&gt; imageTags, final Log log,
+                               final DockerBuildInformation buildInfo,
+                               final int retryPushCount, final int retryPushTimeout,
+                               final boolean skipPush)
+          throws MojoExecutionException, DockerException, InterruptedException {
+
+<span class="fc bfc" id="L81" title="All 2 branches covered.">    if (skipPush) {</span>
+<span class="fc" id="L82">      log.info(&quot;Skipping docker push&quot;);</span>
+<span class="fc" id="L83">      return;</span>
+    }
+
+<span class="fc" id="L86">    int attempt = 0;</span>
+    do {
+<span class="fc" id="L88">      final AnsiProgressHandler ansiProgressHandler = new AnsiProgressHandler();</span>
+<span class="fc" id="L89">      final DigestExtractingProgressHandler handler = new DigestExtractingProgressHandler(</span>
+              ansiProgressHandler);
+
+      try {
+<span class="fc" id="L93">        log.info(&quot;Pushing &quot; + imageName);</span>
+<span class="fc" id="L94">        docker.push(imageName, handler);</span>
+
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (imageTags != null) {</span>
+<span class="fc" id="L97">          final String imageNameNoTag = getImageNameWithNoTag(imageName);</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">          for (final String imageTag : imageTags) {</span>
+<span class="nc" id="L99">            final String imageNameAndTag = imageNameNoTag + &quot;:&quot; + imageTag;</span>
+<span class="nc" id="L100">            log.info(&quot;Pushing &quot; + imageNameAndTag);</span>
+<span class="nc" id="L101">            docker.push(imageNameAndTag, new AnsiProgressHandler());</span>
+<span class="nc" id="L102">          }</span>
+        }
+
+        // A concurrent push raises a generic DockerException and not
+        // the more logical ImagePushFailedException. Hence the rather
+        // wide catch clause.
+<span class="fc" id="L108">      } catch (DockerException e) {</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">        if (attempt &lt; retryPushCount) {</span>
+<span class="fc" id="L110">          log.warn(String.format(PUSH_FAIL_WARN_TEMPLATE, imageName, retryPushTimeout / 1000,</span>
+<span class="fc" id="L111">              attempt + 1, retryPushCount));</span>
+<span class="fc" id="L112">          sleep(retryPushTimeout);</span>
+<span class="fc" id="L113">          continue;</span>
+        } else {
+<span class="fc" id="L115">          throw e;</span>
+        }
+<span class="fc" id="L117">      }</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">      if (buildInfo != null) {</span>
+<span class="fc" id="L119">        final String imageNameWithoutTag = parseImageName(imageName)[0];</span>
+<span class="fc" id="L120">        buildInfo.setDigest(imageNameWithoutTag + &quot;@&quot; + handler.digest());</span>
+<span class="fc" id="L121">      }</span>
+      break;
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">    } while (attempt++ &lt;= retryPushCount);</span>
+<span class="fc" id="L124">  }</span>
+
+  private static String getImageNameWithNoTag(String imageName) {
+<span class="fc" id="L127">    final int tagSeparatorIndex = imageName.lastIndexOf(':');</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">    if (tagSeparatorIndex &gt;= 0) {</span>
+<span class="fc" id="L129">      imageName = imageName.substring(0, tagSeparatorIndex);</span>
+    }
+<span class="fc" id="L131">    return imageName;</span>
+  }
+
+  // push just the tags listed in the pom rather than all images using imageName
+  public static void pushImageTag(DockerClient docker, String imageName,
+                                List&lt;String&gt; imageTags, Log log, boolean skipPush)
+      throws MojoExecutionException, DockerException, IOException, InterruptedException {
+
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">    if (skipPush) {</span>
+<span class="nc" id="L140">      log.info(&quot;Skipping docker push&quot;);</span>
+<span class="nc" id="L141">      return;</span>
+    }
+    // tags should not be empty if you have specified the option to push tags
+<span class="fc bfc" id="L144" title="All 2 branches covered.">    if (imageTags.isEmpty()) {</span>
+<span class="fc" id="L145">      throw new MojoExecutionException(&quot;You have used option \&quot;pushImageTag\&quot; but have&quot;</span>
+                                       + &quot; not specified an \&quot;imageTag\&quot; in your&quot;
+                                       + &quot; docker-maven-client's plugin configuration&quot;);
+    }
+<span class="fc" id="L149">    final CompositeImageName compositeImageName = CompositeImageName.create(imageName, imageTags);</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">    for (final String imageTag : compositeImageName.getImageTags()) {</span>
+<span class="fc" id="L151">      final String imageNameWithTag = compositeImageName.getName() + &quot;:&quot; + imageTag;</span>
+<span class="fc" id="L152">      log.info(&quot;Pushing &quot; + imageNameWithTag);</span>
+<span class="fc" id="L153">      docker.push(imageNameWithTag, new AnsiProgressHandler());</span>
+<span class="fc" id="L154">    }</span>
+<span class="fc" id="L155">  }</span>
+
+  public static void saveImage(DockerClient docker, String imageName,
+                                Path tarArchivePath, Log log)
+          throws DockerException, IOException, InterruptedException {
+<span class="fc" id="L160">      log.info(String.format(&quot;Save docker image %s to %s.&quot;,</span>
+<span class="fc" id="L161">              imageName, tarArchivePath.toAbsolutePath()));</span>
+<span class="fc" id="L162">      final InputStream is = docker.save(imageName);</span>
+<span class="fc" id="L163">      java.nio.file.Files.copy(is, tarArchivePath, StandardCopyOption.REPLACE_EXISTING);</span>
+<span class="fc" id="L164">  }</span>
+
+  @SuppressFBWarnings(&quot;NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE&quot;)
+  public static void writeImageInfoFile(final DockerBuildInformation buildInfo,
+                                        final String tagInfoFile) throws IOException {
+<span class="fc" id="L169">    final Path imageInfoPath = Paths.get(tagInfoFile);</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">    if (imageInfoPath.getParent() != null) {</span>
+<span class="fc" id="L171">      Files.createDirectories(imageInfoPath.getParent());</span>
+    }
+<span class="fc" id="L173">    Files.write(imageInfoPath, buildInfo.toJsonBytes());</span>
+<span class="fc" id="L174">  }</span>
+
+  private static class DigestExtractingProgressHandler implements ProgressHandler {
+
+    private final ProgressHandler delegate;
+    private String digest;
+
+<span class="fc" id="L181">    DigestExtractingProgressHandler(final ProgressHandler delegate) {</span>
+<span class="fc" id="L182">      this.delegate = delegate;</span>
+<span class="fc" id="L183">    }</span>
+
+    @Override
+    public void progress(final ProgressMessage message) throws DockerException {
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">      if (message.digest() != null) {</span>
+<span class="fc" id="L188">        digest = message.digest();</span>
+      }
+
+<span class="fc" id="L191">      delegate.progress(message);</span>
+<span class="fc" id="L192">    }</span>
+
+    public String digest() {
+<span class="fc" id="L195">      return digest;</span>
+    }
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.5.201910111838</span></div></body></html>
