@@ -2,7 +2,7 @@ To query the parameter information, please use diffcount --help to get help
 
 The use method is introduced through examples as follows:
 
-1. Difference Statistics
+### Difference Statistics
 
   Count the amount of code changes of a certain version of the code package relative to an original baseline code package
   And the results of the non-empty and non-comment lines (NBNC) in each language in the changed code amount
