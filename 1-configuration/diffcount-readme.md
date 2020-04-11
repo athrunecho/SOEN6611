@@ -11,13 +11,13 @@ The use method is introduced through examples as follows:
   
   Execute in the diffcount directory:
   
-     diffcount test \ sp1 test \ sp2
+      diffcount test \ sp1 test \ sp2
   
   In actual use, there may be a case where the file name and directory name are inconsistent, if you want to ignore
   The file name case difference, you need to use the --ignore-case parameter, otherwise two identical files
   One will count as deletion and one will count as addition
      
-G: \ diffcount> diffcount test \ sp1 test \ sp2
+      G: \ diffcount> diffcount test \ sp1 test \ sp2
 
 Diffcount [test \ sp1] and [test \ sp2] result:
 
