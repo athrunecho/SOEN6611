@@ -13,7 +13,7 @@ The use method is introduced through examples as follows:
   Execute in the diffcount directory:
   
   
-      diffcount test \ sp1 test \ sp2
+       diffcount test \ sp1 test \ sp2
       
   
   In actual use, there may be a case where the file name and directory name are inconsistent, if you want to ignore
