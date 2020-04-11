@@ -37,4 +37,5 @@ XML 126 0 0 126 2 0 124 0.12
       Total: 57.65 (standard C lines)
 
 The meanings of ADD MOD DEL A & M BLK CMT NBNC RATE are:
+
 Add, modify, delete, add + modify, blank line, comment, non-empty non-comment line, standard C conversion rate
