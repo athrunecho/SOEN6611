@@ -5,19 +5,26 @@ The use method is introduced through examples as follows:
 ### Difference Statistics
 
   Count the amount of code changes of a certain version of the code package relative to an original baseline code package
+  
   And the results of the non-empty and non-comment lines (NBNC) in each language in the changed code amount
   
   The default diffcount implementation is difference statistics, just keep up with the directories of the two code packages
   
   Execute in the diffcount directory:
   
+  
       diffcount test \ sp1 test \ sp2
+      
   
   In actual use, there may be a case where the file name and directory name are inconsistent, if you want to ignore
+  
   The file name case difference, you need to use the --ignore-case parameter, otherwise two identical files
+  
   One will count as deletion and one will count as addition
+  
      
       G: \ diffcount> diffcount test \ sp1 test \ sp2
+      
 
 Diffcount [test \ sp1] and [test \ sp2] result:
 
