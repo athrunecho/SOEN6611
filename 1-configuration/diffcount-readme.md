@@ -22,7 +22,7 @@ The use method is introduced through examples as follows:
   
   One will count as deletion and one will count as addition
   
-       G: \ diffcount> diffcount test \ sp1 test \ sp2
+            G: \ diffcount> diffcount test \ sp1 test \ sp2
       
 
 Diffcount [test \ sp1] and [test \ sp2] result:
