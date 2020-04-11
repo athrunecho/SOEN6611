@@ -24,9 +24,13 @@ Diffcount [test \ sp1] and [test \ sp2] result:
 LANG ADD MOD DEL A & M BLK CMT NBNC RATE
 -------------------------------------------------- ---------------------
 C 44 7 26 51 8 11 35 1.00
+
 Pascal 0 0 25 0 0 0 0 0.23
+
 Java 7 4 11 11 0 3 9 0.41
+
 Config 31 4 0 35 1 0 34 0.12
+
 XML 126 0 0 126 2 0 124 0.12
 -------------------------------------------------- ---------------------
   Convert all NBNC lines to standard C
